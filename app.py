@@ -47,12 +47,20 @@ except Exception as exc:
     st.error(f"파일을 분석할 수 없습니다. {exc}")
     st.stop()
 
+# Streamlit 개발 서버가 변경 전 analysis 모듈을 잠시 유지해도 난이도를 안전하게 생성합니다.
+if "난이도" not in prepared.columns:
+    order = pd.to_numeric(prepared["제시순서"], errors="coerce")
+    prepared["난이도"] = pd.cut(
+        order, bins=[0, 4, 8, 12], labels=["하", "중", "상"]
+    ).astype("string")
+
 prepared["자동분류"] = prepared["지식수준"] + " · " + prepared["조건"]
 available = set(prepared["참가순번_num"].dropna().astype(int))
 
 with st.sidebar:
     st.header("분석 설정")
-    selection_mode = st.radio("참가순번 선택", ["전체", "범위 지정", "직접 입력"], horizontal=True)
+    st.subheader("참가자 선택")
+    selection_mode = st.radio("선택 방식", ["전체", "범위 지정", "직접 입력"], horizontal=True)
     requested, input_error = set(), None
     if selection_mode == "범위 지정" and available:
         start = st.number_input("시작 순번", min_value=0, value=min(available), step=1)
@@ -70,6 +78,9 @@ with st.sidebar:
     except ValueError as exc:
         excluded_numbers = set()
         input_error = str(exc)
+
+    st.divider(); st.subheader("분석 범위")
+    ai_answer_filter = st.radio("AI 답변 유형", ["전체", "AI 정답", "AI 오답"], horizontal=True)
 
     selected_numbers = (requested & available) - excluded_numbers
     missing_numbers = requested - available
@@ -89,6 +100,8 @@ with st.sidebar:
     show_basic = st.checkbox("기본 지표 (성과·수용·유지)", value=True)
     with st.expander("기본 지표 개별 선택"):
         individual_metrics = [m for m in ["성과", "수용", "유지"] if st.checkbox(m, key=f"metric_{m}")]
+    show_ai_answer_comparison = st.checkbox("AI 정답 여부별 비교", value=False)
+    show_difficulty_comparison = st.checkbox("난이도별 비교", value=False)
     show_cases = st.checkbox("8개 케이스", value=False)
     show_derived = {name: st.checkbox(f"{name}도", value=False, key=f"derived_{name}") for name in ["의존", "불신", "고착", "수정"]}
 
@@ -100,11 +113,14 @@ if missing_numbers:
 if applied_exclusions:
     st.caption("직접 제외된 참가순번: " + ", ".join(map(str, sorted(applied_exclusions))))
 
-filtered = selected[selected["자동분류"].isin(selected_groups)].copy()
+group_filtered = selected[selected["자동분류"].isin(selected_groups)].copy()
+filtered = group_filtered.copy()
+if ai_answer_filter != "전체":
+    filtered = filtered[filtered["AI답변유형"].eq(ai_answer_filter)].copy()
 if filtered.empty: st.warning("현재 선택에 해당하는 12문항 완주자가 없습니다."); st.stop()
 participants = filtered.drop_duplicates("participant_id")
 counts = participants["자동분류"].value_counts().reindex(GROUPS, fill_value=0)
-st.markdown(f'<div class="summary-note"><b>{len(participants)}명</b> · {len(filtered)}건 응답 &nbsp;|&nbsp; '+" &nbsp;·&nbsp; ".join(f"{g} {counts[g]}명" for g in GROUPS)+"</div>", unsafe_allow_html=True)
+st.markdown(f'<div class="summary-note"><b>{len(participants)}명</b> · {len(filtered)}건 응답 · AI 답변 유형: <b>{ai_answer_filter}</b> &nbsp;|&nbsp; '+" &nbsp;·&nbsp; ".join(f"{g} {counts[g]}명" for g in GROUPS)+"</div>", unsafe_allow_html=True)
 
 def draw_bar(data, x, y, y_title):
     if data.empty: return
@@ -157,6 +173,74 @@ if metrics:
     draw_bar(basic.dropna(subset=["평균"]),"지표","평균","참가자별 비율 평균")
     if "유지" in metrics and any(g.endswith("AI First") for g in selected_groups): st.caption("AI First에는 독립적인 1차 답변이 없으므로 유지율은 ‘해당 없음’입니다.")
 
+if show_ai_answer_comparison:
+    st.subheader("AI 정답 여부별 비교")
+    comparison_rows = []
+    for group in selected_groups:
+        for answer_type in ["AI 정답", "AI 오답"]:
+            subset = group_filtered[
+                group_filtered["자동분류"].eq(group)
+                & group_filtered["AI답변유형"].eq(answer_type)
+            ]
+            comparison_metrics = ["성과", "수용", "유지"]
+            p = participant_summary(subset, comparison_metrics) if not subset.empty else pd.DataFrame()
+            for metric in comparison_metrics:
+                if metric == "유지" and group.endswith("AI First"):
+                    continue
+                comparison_rows.append({
+                    "자동분류": group,
+                    "비교 항목": f"{metric} · {answer_type}",
+                    "평균": pd.NA if p.empty else p[metric].mean(),
+                })
+    comparison_data = pd.DataFrame(comparison_rows).dropna(subset=["평균"])
+    draw_bar(comparison_data, "비교 항목", "평균", "참가자별 비율 평균")
+    st.caption("이 비교 그래프는 위의 AI 답변 유형 필터와 관계없이 AI 정답과 AI 오답 응답을 함께 비교합니다.")
+
+if show_difficulty_comparison:
+    st.subheader("난이도별 비교")
+    difficulty_rows = []
+    for group in selected_groups:
+        for difficulty in ["하", "중", "상"]:
+            subset = group_filtered[
+                group_filtered["자동분류"].eq(group)
+                & group_filtered["난이도"].eq(difficulty)
+            ]
+            difficulty_metrics = ["성과", "수용", "유지"]
+            p = participant_summary(subset, difficulty_metrics) if not subset.empty else pd.DataFrame()
+            for metric in difficulty_metrics:
+                if metric == "유지" and group.endswith("AI First"):
+                    continue
+                difficulty_rows.append({
+                    "자동분류": group,
+                    "난이도": difficulty,
+                    "지표": metric,
+                    "평균": pd.NA if p.empty else p[metric].mean(),
+                })
+    difficulty_data = pd.DataFrame(difficulty_rows).dropna(subset=["평균"])
+    if not difficulty_data.empty:
+        fig = px.bar(
+            difficulty_data, x="난이도", y="평균", color="자동분류",
+            facet_col="지표", barmode="group", text_auto=".1%",
+            category_orders={"자동분류": GROUPS, "난이도": ["하", "중", "상"], "지표": ["성과", "수용", "유지"]},
+            color_discrete_map=COLORS,
+        )
+        fig.update_traces(
+            textposition="outside", cliponaxis=False,
+            textfont=dict(size=11, color="#172033"),
+            marker_line=dict(color="rgba(255,255,255,.9)", width=1),
+            hovertemplate="%{fullData.name}<br>난이도 %{x}<br><b>%{y:.1%}</b><extra></extra>",
+        )
+        fig.update_yaxes(tickformat=".0%", range=[0, 1.14], gridcolor="#E7EBF0", title=None)
+        fig.update_xaxes(title=None, showline=True, linecolor="#C9D1DC")
+        fig.for_each_annotation(lambda annotation: annotation.update(text=annotation.text.split("=")[-1]))
+        fig.update_layout(
+            height=340, legend=dict(title=None, orientation="h", yanchor="bottom", y=1.08, x=0),
+            plot_bgcolor="white", paper_bgcolor="white", margin=dict(l=12, r=12, t=72, b=12),
+            bargap=.28, hoverlabel=dict(font_size=13),
+        )
+        st.plotly_chart(fig, width="stretch")
+    st.caption("난이도는 제시순서 1–4=하, 5–8=중, 9–12=상으로 구분하며 AI 답변 유형 필터와 독립적으로 계산합니다.")
+
 human=filtered[filtered["조건"].eq("Human First")].copy()
 human_groups=[g for g in selected_groups if g.endswith("Human First") and counts[g]>0]
 if show_cases:
@@ -188,7 +272,7 @@ for category,enabled in show_derived.items():
     else:
         draw_bar(data,"구분","평균","참가자별 발생률 평균")
 
-if not metrics and not show_cases and not any(show_derived.values()): st.info("사이드바에서 보고 싶은 분석 항목을 선택해주세요.")
+if not metrics and not show_cases and not show_ai_answer_comparison and not show_difficulty_comparison and not any(show_derived.values()): st.info("사이드바에서 보고 싶은 분석 항목을 선택해주세요.")
 with st.expander("데이터 품질과 다운로드"):
     q1,q2,q3,q4=st.columns(4)
     q1.metric("원본 참가자",f"{audit.raw_participants}명"); q2.metric("12문항 완주자",f"{audit.eligible_participants}명"); q3.metric("제외된 미완주자",f"{audit.incomplete_participants}명"); q4.metric("중복 의심 응답행",f"{audit.duplicate_response_rows}건")

@@ -9,4 +9,4 @@ if (-not (Test-Path -LiteralPath $pythonExe)) {
     exit 1
 }
 
-& $pythonExe -m streamlit run (Join-Path $projectRoot "app.py")
+& $pythonExe -m streamlit run (Join-Path $projectRoot "app.py") --browser.gatherUsageStats false

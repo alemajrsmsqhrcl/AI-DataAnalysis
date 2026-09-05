@@ -18,7 +18,9 @@ REQUIRED_COLUMNS = {
     "정답",
     "1차답",
     "AI제안",
+    "AI정답여부",
     "최종답",
+    "제시순서",
 }
 
 PRIVATE_COLUMNS = ["이름", "전화번호"]
@@ -89,11 +91,15 @@ def prepare_data(raw: pd.DataFrame) -> tuple[pd.DataFrame, DataAudit]:
         raise ValueError("필수 열이 없습니다: " + ", ".join(sorted(missing)))
 
     df = raw.copy()
-    for col in ["참가순번", "문제번호", "학년", "정답", "1차답", "AI제안", "최종답"]:
+    for col in ["참가순번", "문제번호", "학년", "정답", "1차답", "AI제안", "AI정답여부", "최종답", "제시순서"]:
         df[col] = _normalize_answer(df[col])
 
     df["참가순번_num"] = pd.to_numeric(df["참가순번"], errors="coerce")
     df["문제번호_num"] = pd.to_numeric(df["문제번호"], errors="coerce")
+    df["제시순서_num"] = pd.to_numeric(df["제시순서"], errors="coerce")
+    df["난이도"] = pd.cut(
+        df["제시순서_num"], bins=[0, 4, 8, 12], labels=["하", "중", "상"]
+    ).astype("string")
     df["지식수준"] = df["학년"].map(knowledge_group)
 
     valid = df[df["문제번호_num"].notna()].copy()
@@ -111,6 +117,9 @@ def prepare_data(raw: pd.DataFrame) -> tuple[pd.DataFrame, DataAudit]:
     eligible["성과"] = eligible["최종답"].eq(eligible["정답"])
     eligible["수용"] = eligible["최종답"].eq(eligible["AI제안"])
     eligible["유지"] = eligible["최종답"].eq(eligible["1차답"])
+    eligible["AI답변유형"] = eligible["AI정답여부"].map(
+        {"정답": "AI 정답", "오답": "AI 오답"}
+    ).fillna("미분류")
 
     human = eligible["조건"].eq("Human First")
     case = pd.Series(pd.NA, index=eligible.index, dtype="Int64")
